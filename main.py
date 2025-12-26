@@ -12,10 +12,7 @@ load_dotenv()
 # Import modules
 from stt import SpeechToText
 from llm import BankingLLM
-from tts import TextToSpeech, FallbackTTS, get_tts_engine, KOKORO_AVAILABLE
-
-# Configuration constants
-BARGE_IN_DETECTION_DURATION = 0.05  # seconds to check for user speech during TTS
+from tts import TextToSpeech, get_tts_engine, KOKORO_AVAILABLE
 
 
 class LatencyTracker:
@@ -146,7 +143,6 @@ class VoiceAgent:
         print("╔" + "═" * 48 + "╗")
         print("║" + "  Voice Session Active".center(48) + "║")
         print("╠" + "═" * 48 + "╣")
-        print("║  Speak anytime to interrupt the agent          ║")
         print("║  Say 'goodbye' or 'exit' to end                ║")
         print("╚" + "═" * 48 + "╝\n")
 
@@ -177,17 +173,10 @@ class VoiceAgent:
 
                 print(f"🤖 Agent: {response}")
 
-                # === TTS Phase with Barge-in Support ===
-                tts_metrics = self.tts.speak(
-                    response,
-                    interrupt_callback=lambda: self.stt.detect_speech_quick(BARGE_IN_DETECTION_DURATION)
-                )
+                # === TTS Phase ===
+                tts_metrics = self.tts.speak(response)
                 self.latency_tracker.record("tts_synthesis_ms", tts_metrics.get("synthesis_ms", 0))
                 self.latency_tracker.record("tts_total_ms", tts_metrics.get("total_ms", 0))
-
-                # If interrupted, show message
-                if tts_metrics.get("interrupted"):
-                    print("(interrupted)")
 
                 # End turn and show metrics
                 turn_metrics = self.latency_tracker.end_turn()
