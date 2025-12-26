@@ -249,6 +249,30 @@ class SpeechToText:
 
         return text, metrics
 
+    def detect_speech_quick(self, duration=0.1):
+        """Quick check if speech is detected - for barge-in detection."""
+        try:
+            self.open_stream()
+            samples_needed = int(self.sample_rate * duration)
+            chunks_needed = max(1, samples_needed // self.chunk_size)
+            
+            speech_detected = False
+            for _ in range(chunks_needed):
+                try:
+                    data = self.stream.read(self.chunk_size, exception_on_overflow=False)
+                    chunk = np.frombuffer(data, dtype=np.int16)
+                    is_speech, _ = self.vad.is_speech(chunk)
+                    if is_speech:
+                        speech_detected = True
+                        break
+                except (OSError, IOError):
+                    continue
+            
+            self.close_stream()
+            return speech_detected
+        except (OSError, IOError, RuntimeError):
+            return False
+
     def listen_realtime(self, on_text=None, stop_phrase="stop listening"):
         """Real-time transcription with periodic updates."""
 

@@ -110,13 +110,12 @@ class BankingLLM:
 
         # System prompt optimized for voice and low latency
         self.system_prompt = f"""You are a customer support agent for Askri Bank Limited.
-Keep responses brief (1-3 sentences). Be helpful and professional.
-Never ask for full SSN, passwords, or PINs. Guide to secure channels for sensitive actions.
+Keep responses brief (1-2 sentences). Be helpful.
+Never ask for SSN, passwords, or PINs.
 
-KNOWLEDGE:
 {ASKRI_BANK_KNOWLEDGE_BASE}
 
-Respond naturally as if speaking."""
+Be concise."""
 
     def get_response(self, user_message: str) -> Tuple[str, dict]:
         """Get a response from the LLM."""
@@ -135,9 +134,9 @@ Respond naturally as if speaking."""
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=0.6,
-                max_tokens=150,
-                top_p=0.9,
+                temperature=0.5,
+                max_tokens=100,
+                top_p=0.85,
                 stream=False
             )
 
@@ -176,8 +175,8 @@ Respond naturally as if speaking."""
             stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=0.6,
-                max_tokens=150,
+                temperature=0.5,
+                max_tokens=100,
                 stream=True
             )
 

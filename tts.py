@@ -61,6 +61,7 @@ class TextToSpeech:
         # Playback control
         self._stop_event = threading.Event()
         self._playback_thread = None
+        self._interrupted = False
 
         if KOKORO_AVAILABLE:
             try:
@@ -118,8 +119,8 @@ class TextToSpeech:
         except Exception as e:
             print(f"TTS error: {e}")
 
-    def speak(self, text: str, blocking: bool = True) -> dict:
-        """Synthesize and play text."""
+    def speak(self, text: str, blocking: bool = True, interrupt_callback=None) -> dict:
+        """Synthesize and play text with optional interrupt detection."""
         if not text or not text.strip():
             return {"error": "Empty text"}
 
@@ -127,20 +128,26 @@ class TextToSpeech:
 
         self.stop()
         self._stop_event.clear()
+        self._interrupted = False
 
         audio, synth_time = self.synthesize(text)
 
         metrics = {
             "synthesis_ms": synth_time,
             "audio_duration_ms": 0,
-            "total_ms": 0
+            "total_ms": 0,
+            "interrupted": False
         }
 
         if len(audio) > 0:
             metrics["audio_duration_ms"] = len(audio) / self.sample_rate * 1000
 
             if blocking:
-                self._play_blocking(audio)
+                if interrupt_callback:
+                    self._play_with_interrupt(audio, interrupt_callback)
+                    metrics["interrupted"] = self._interrupted
+                else:
+                    self._play_blocking(audio)
             else:
                 self._play_async(audio)
 
@@ -148,6 +155,31 @@ class TextToSpeech:
         self.last_total_latency_ms = metrics["total_ms"]
 
         return metrics
+
+    def _play_with_interrupt(self, audio: np.ndarray, interrupt_callback):
+        """Play audio with interrupt detection - checks for user speech."""
+        try:
+            # Play in small chunks to allow interrupt checking
+            chunk_size = int(self.sample_rate * 0.1)  # 100ms chunks
+            total_samples = len(audio)
+            
+            for i in range(0, total_samples, chunk_size):
+                if self._stop_event.is_set():
+                    self._interrupted = True
+                    break
+                
+                # Check for user interrupt
+                if interrupt_callback and interrupt_callback():
+                    self._interrupted = True
+                    sd.stop()
+                    break
+                
+                chunk = audio[i:i + chunk_size]
+                sd.play(chunk, samplerate=self.sample_rate)
+                sd.wait()
+                
+        except Exception as e:
+            print(f"Playback error: {e}")
 
     def speak_streaming(self, text: str) -> dict:
         """Speak with streaming for lowest latency."""
@@ -257,7 +289,7 @@ class FallbackTTS:
                 print(f"pyttsx3 init failed: {e}")
                 self.engine = None
 
-    def speak(self, text: str, blocking: bool = True) -> dict:
+    def speak(self, text: str, blocking: bool = True, interrupt_callback=None) -> dict:
         """Speak text."""
         start_time = time.perf_counter()
 
@@ -275,7 +307,7 @@ class FallbackTTS:
         total_time = (time.perf_counter() - start_time) * 1000
         self.last_total_latency_ms = total_time
 
-        return {"total_ms": total_time}
+        return {"total_ms": total_time, "interrupted": False}
 
     def stop(self):
         """Stop speaking."""
@@ -295,9 +327,9 @@ class FallbackTTS:
 def get_tts_engine() -> TextToSpeech:
     """Get the best available TTS engine."""
     if KOKORO_AVAILABLE:
-        return TextToSpeech(voice="af_heart", speed=1.0)
+        return TextToSpeech(voice="af_heart", speed=1.1)  # Slightly faster
     elif PYTTSX3_AVAILABLE:
-        return FallbackTTS()
+        return FallbackTTS(rate=190)  # Faster speech rate
     else:
         return FallbackTTS()
 

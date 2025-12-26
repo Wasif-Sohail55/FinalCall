@@ -14,6 +14,9 @@ from stt import SpeechToText
 from llm import BankingLLM
 from tts import TextToSpeech, FallbackTTS, get_tts_engine, KOKORO_AVAILABLE
 
+# Configuration constants
+BARGE_IN_DETECTION_DURATION = 0.05  # seconds to check for user speech during TTS
+
 
 class LatencyTracker:
     """Track and display latency metrics."""
@@ -92,9 +95,9 @@ class VoiceAgent:
 
         # Initialize STT with optimized settings for low latency
         self.stt = SpeechToText(
-            vad_threshold=400,
-            silence_duration=0.8,
-            chunk_duration=1.5
+            vad_threshold=350,          # Lower threshold for faster detection
+            silence_duration=0.6,       # Faster end-of-speech detection
+            chunk_duration=1.0          # Smaller chunks for quicker processing
         )
         print("✓ STT ready")
 
@@ -143,11 +146,12 @@ class VoiceAgent:
         print("╔" + "═" * 48 + "╗")
         print("║" + "  Voice Session Active".center(48) + "║")
         print("╠" + "═" * 48 + "╣")
-        print("║  Say 'goodbye' or 'exit' to end              ║")
+        print("║  Speak anytime to interrupt the agent          ║")
+        print("║  Say 'goodbye' or 'exit' to end                ║")
         print("╚" + "═" * 48 + "╝\n")
 
     def _conversation_loop(self):
-        """Main conversation loop."""
+        """Main conversation loop with barge-in support."""
         while self.running:
             try:
                 self.latency_tracker.start_turn()
@@ -173,10 +177,17 @@ class VoiceAgent:
 
                 print(f"🤖 Agent: {response}")
 
-                # === TTS Phase ===
-                tts_metrics = self.tts.speak(response)
+                # === TTS Phase with Barge-in Support ===
+                tts_metrics = self.tts.speak(
+                    response,
+                    interrupt_callback=lambda: self.stt.detect_speech_quick(BARGE_IN_DETECTION_DURATION)
+                )
                 self.latency_tracker.record("tts_synthesis_ms", tts_metrics.get("synthesis_ms", 0))
                 self.latency_tracker.record("tts_total_ms", tts_metrics.get("total_ms", 0))
+
+                # If interrupted, show message
+                if tts_metrics.get("interrupted"):
+                    print("(interrupted)")
 
                 # End turn and show metrics
                 turn_metrics = self.latency_tracker.end_turn()
