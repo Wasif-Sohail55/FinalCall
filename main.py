@@ -143,6 +143,7 @@ class VoiceAgent:
         print("╔" + "═" * 48 + "╗")
         print("║" + "  Voice Session Active".center(48) + "║")
         print("╠" + "═" * 48 + "╣")
+        print("║  Speak anytime to interrupt the agent          ║")
         print("║  Say 'goodbye' or 'exit' to end                ║")
         print("╚" + "═" * 48 + "╝\n")
 
@@ -173,10 +174,25 @@ class VoiceAgent:
 
                 print(f"🤖 Agent: {response}")
 
-                # === TTS Phase ===
-                tts_metrics = self.tts.speak(response)
+                # === TTS Phase with Barge-in Support ===
+                # Start monitoring for interrupts
+                self.stt.start_interrupt_monitor()
+                
+                tts_metrics = self.tts.speak_interruptible(
+                    response,
+                    interrupt_detector=self.stt.check_for_interrupt
+                )
+                
+                # Stop monitoring
+                self.stt.stop_interrupt_monitor()
+                
                 self.latency_tracker.record("tts_synthesis_ms", tts_metrics.get("synthesis_ms", 0))
                 self.latency_tracker.record("tts_total_ms", tts_metrics.get("total_ms", 0))
+
+                # If interrupted, show message but don't display latency
+                if tts_metrics.get("interrupted"):
+                    print("(interrupted - listening...)")
+                    continue  # Skip metrics and immediately listen for new input
 
                 # End turn and show metrics
                 turn_metrics = self.latency_tracker.end_turn()

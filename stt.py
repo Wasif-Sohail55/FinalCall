@@ -84,6 +84,11 @@ class SpeechToText:
         self.vad = EnergyVAD(threshold=vad_threshold, sample_rate=self.sample_rate)
         self.stream = None
         self.is_running = False
+        
+        # For interrupt detection
+        self._interrupt_stream = None
+        self._interrupt_detected = False
+        self._monitoring = False
 
     def __del__(self):
         self.close()
@@ -248,6 +253,61 @@ class SpeechToText:
         metrics["stt_ms"] = stt_time
 
         return text, metrics
+
+    def start_interrupt_monitor(self):
+        """Start monitoring for speech interrupts (for barge-in detection)."""
+        self._interrupt_detected = False
+        self._monitoring = True
+        
+        try:
+            self._interrupt_stream = self.pa.open(
+                format=pyaudio.paInt16,
+                channels=self.channels,
+                rate=self.sample_rate,
+                input=True,
+                input_device_index=self.device_index,
+                frames_per_buffer=self.chunk_size
+            )
+        except (OSError, IOError) as e:
+            print(f"Interrupt monitor init failed: {e}")
+            self._monitoring = False
+            return
+
+    def stop_interrupt_monitor(self):
+        """Stop the interrupt monitor."""
+        self._monitoring = False
+        if self._interrupt_stream:
+            try:
+                self._interrupt_stream.stop_stream()
+                self._interrupt_stream.close()
+            except:
+                pass
+            self._interrupt_stream = None
+
+    def check_for_interrupt(self) -> bool:
+        """
+        Check if user is speaking (for barge-in detection).
+        Returns True if speech is detected.
+        """
+        if not self._monitoring or not self._interrupt_stream:
+            return False
+        
+        try:
+            # Read a small chunk without blocking
+            data = self._interrupt_stream.read(self.chunk_size, exception_on_overflow=False)
+            chunk = np.frombuffer(data, dtype=np.int16)
+            is_speech, _ = self.vad.is_speech(chunk)
+            
+            if is_speech:
+                self._interrupt_detected = True
+                return True
+            return False
+        except Exception:
+            return False
+
+    def was_interrupted(self) -> bool:
+        """Check if an interrupt was detected."""
+        return self._interrupt_detected
 
     def listen_realtime(self, on_text=None, stop_phrase="stop listening"):
         """Real-time transcription with periodic updates."""

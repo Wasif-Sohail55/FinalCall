@@ -14,41 +14,18 @@ try:
 except ImportError:
     pass
 
-# Fallback TTS
-PYTTSX3_AVAILABLE = False
-try:
-    import pyttsx3
-    PYTTSX3_AVAILABLE = True
-except ImportError:
-    pass
-
 
 class TextToSpeech:
     """
-    Kokoro TTS with streaming support for low latency.
+    Kokoro TTS with barge-in support for natural conversation.
     """
 
     def __init__(
         self,
-        voice:  str = "af_heart",
+        voice: str = "af_heart",
         speed: float = 1.0,
         sample_rate: int = 24000
     ):
-        """
-        Initialize Kokoro TTS.
-
-        Args:
-            voice:  Voice model.  Options:
-                - 'af_heart' (American Female - warm)
-                - 'af_bella' (American Female - professional)
-                - 'af_sarah' (American Female - friendly)
-                - 'am_adam' (American Male)
-                - 'am_michael' (American Male - deep)
-                - 'bf_emma' (British Female)
-                - 'bm_george' (British Male)
-            speed: Speech rate (0.5 - 2.0)
-            sample_rate: Audio sample rate
-        """
         self.voice = voice
         self.speed = speed
         self.sample_rate = sample_rate
@@ -61,6 +38,8 @@ class TextToSpeech:
         # Playback control
         self._stop_event = threading.Event()
         self._playback_thread = None
+        self._is_speaking = False
+        self._was_interrupted = False
 
         if KOKORO_AVAILABLE:
             try:
@@ -102,22 +81,6 @@ class TextToSpeech:
             print(f"TTS error: {e}")
             return np.array([], dtype=np.float32), 0
 
-    def synthesize_streaming(self, text: str) -> Generator[np.ndarray, None, None]:
-        """Stream audio chunks for lower latency."""
-        if not text or self.pipeline is None:
-            return
-
-        try:
-            for _, _, audio in self.pipeline(
-                text,
-                voice=self.voice,
-                speed=self.speed
-            ):
-                if audio is not None:
-                    yield audio
-        except Exception as e:
-            print(f"TTS error: {e}")
-
     def speak(self, text: str, blocking: bool = True) -> dict:
         """Synthesize and play text."""
         if not text or not text.strip():
@@ -127,13 +90,15 @@ class TextToSpeech:
 
         self.stop()
         self._stop_event.clear()
+        self._was_interrupted = False
 
         audio, synth_time = self.synthesize(text)
 
         metrics = {
             "synthesis_ms": synth_time,
             "audio_duration_ms": 0,
-            "total_ms": 0
+            "total_ms": 0,
+            "interrupted": False
         }
 
         if len(audio) > 0:
@@ -144,87 +109,115 @@ class TextToSpeech:
             else:
                 self._play_async(audio)
 
+            metrics["interrupted"] = self._was_interrupted
+
         metrics["total_ms"] = (time.perf_counter() - total_start) * 1000
         self.last_total_latency_ms = metrics["total_ms"]
 
         return metrics
 
-    def speak_streaming(self, text: str) -> dict:
-        """Speak with streaming for lowest latency."""
-        if not text or self.pipeline is None:
-            return self.speak(text)
+    def speak_interruptible(self, text: str, interrupt_detector) -> dict:
+        """
+        Speak text with barge-in support.
+        Stops immediately when interrupt_detector returns True.
+        
+        Args:
+            text: Text to speak
+            interrupt_detector: Callable that returns True if user is speaking
+        """
+        if not text or not text.strip():
+            return {"error": "Empty text"}
 
         total_start = time.perf_counter()
-        first_chunk_time = None
 
         self.stop()
         self._stop_event.clear()
+        self._was_interrupted = False
 
-        audio_queue = queue.Queue()
+        audio, synth_time = self.synthesize(text)
 
-        def producer():
-            nonlocal first_chunk_time
-            for chunk in self.synthesize_streaming(text):
-                if self._stop_event.is_set():
-                    break
-                if first_chunk_time is None:
-                    first_chunk_time = (time.perf_counter() - total_start) * 1000
-                audio_queue.put(chunk)
-            audio_queue.put(None)
+        metrics = {
+            "synthesis_ms": synth_time,
+            "audio_duration_ms": 0,
+            "total_ms": 0,
+            "interrupted": False
+        }
 
-        def consumer():
-            while not self._stop_event.is_set():
-                try:
-                    chunk = audio_queue.get(timeout=0.1)
-                    if chunk is None:
+        if len(audio) > 0:
+            metrics["audio_duration_ms"] = len(audio) / self.sample_rate * 1000
+            
+            # Play in chunks with interrupt checking
+            self._is_speaking = True
+            chunk_duration = 0.15  # 150ms chunks for responsive interruption
+            chunk_samples = int(self.sample_rate * chunk_duration)
+            
+            try:
+                for i in range(0, len(audio), chunk_samples):
+                    if self._stop_event.is_set():
+                        self._was_interrupted = True
                         break
+                    
+                    # Check for interruption before playing each chunk
+                    if interrupt_detector():
+                        self._was_interrupted = True
+                        sd.stop()
+                        break
+                    
+                    chunk = audio[i:i + chunk_samples]
                     sd.play(chunk, samplerate=self.sample_rate)
                     sd.wait()
-                except queue.Empty:
-                    continue
+                    
+            except Exception as e:
+                print(f"Playback error: {e}")
+            finally:
+                self._is_speaking = False
+                
+            metrics["interrupted"] = self._was_interrupted
 
-        prod_thread = threading.Thread(target=producer)
-        cons_thread = threading.Thread(target=consumer)
+        metrics["total_ms"] = (time.perf_counter() - total_start) * 1000
+        self.last_total_latency_ms = metrics["total_ms"]
 
-        prod_thread.start()
-        cons_thread.start()
-
-        prod_thread.join()
-        cons_thread.join()
-
-        total_time = (time.perf_counter() - total_start) * 1000
-
-        return {
-            "first_chunk_ms": first_chunk_time or 0,
-            "total_ms": total_time
-        }
+        return metrics
 
     def _play_blocking(self, audio: np.ndarray):
         """Play audio and wait for completion."""
+        self._is_speaking = True
         try:
             sd.play(audio, samplerate=self.sample_rate)
             sd.wait()
         except Exception as e:
             print(f"Playback error: {e}")
+        finally:
+            self._is_speaking = False
 
     def _play_async(self, audio: np.ndarray):
         """Play audio in background."""
         def play():
+            self._is_speaking = True
             try:
                 sd.play(audio, samplerate=self.sample_rate)
                 sd.wait()
             except Exception as e:
                 print(f"Playback error: {e}")
+            finally:
+                self._is_speaking = False
 
         self._playback_thread = threading.Thread(target=play)
         self._playback_thread.start()
 
     def stop(self):
-        """Stop current playback."""
+        """Stop current playback immediately."""
         self._stop_event.set()
+        self._was_interrupted = True
         sd.stop()
+        self._is_speaking = False
         if self._playback_thread and self._playback_thread.is_alive():
             self._playback_thread.join(timeout=0.5)
+
+    @property
+    def is_speaking(self):
+        """Check if TTS is currently playing audio."""
+        return self._is_speaking
 
     def set_voice(self, voice: str):
         """Change voice."""
@@ -233,63 +226,6 @@ class TextToSpeech:
     def set_speed(self, speed: float):
         """Change speed (0.5-2.0)."""
         self.speed = max(0.5, min(2.0, speed))
-
-
-class FallbackTTS:
-    """Fallback TTS using pyttsx3."""
-
-    def __init__(self, rate: int = 175):
-        self.engine = None
-        self.last_synthesis_latency_ms = 0
-        self.last_total_latency_ms = 0
-
-        if PYTTSX3_AVAILABLE:
-            try:
-                self.engine = pyttsx3.init()
-                self.engine.setProperty('rate', rate)
-
-                voices = self.engine.getProperty('voices')
-                for voice in voices:
-                    if 'female' in voice.name.lower():
-                        self.engine.setProperty('voice', voice.id)
-                        break
-            except Exception as e:
-                print(f"pyttsx3 init failed: {e}")
-                self.engine = None
-
-    def speak(self, text: str, blocking: bool = True) -> dict:
-        """Speak text."""
-        start_time = time.perf_counter()
-
-        if not text:
-            return {"error": "Empty text"}
-
-        if self.engine:
-            try:
-                self.engine.say(text)
-                if blocking:
-                    self.engine.runAndWait()
-            except Exception as e:
-                print(f"TTS Error: {e}")
-
-        total_time = (time.perf_counter() - start_time) * 1000
-        self.last_total_latency_ms = total_time
-
-        return {"total_ms": total_time}
-
-    def stop(self):
-        """Stop speaking."""
-        if self.engine:
-            try:
-                self.engine.stop()
-            except:
-                pass
-
-    def set_speed(self, speed: float):
-        """Set speech rate."""
-        if self.engine:
-            rate = int(175 * speed)
-            self.engine.setProperty('rate', rate)
 
 
 def get_tts_engine() -> TextToSpeech:
